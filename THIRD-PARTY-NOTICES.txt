@@ -1,0 +1,12 @@
+Codex Repair portable build includes components from:
+
+- .NET Runtime — MIT License
+  https://github.com/dotnet/runtime
+- Microsoft.Data.Sqlite — MIT License
+  https://learn.microsoft.com/dotnet/standard/data/sqlite/
+- SQLite — Public Domain
+  https://www.sqlite.org/copyright.html
+- SQLitePCLRaw — Apache License 2.0
+  https://github.com/ericsink/SQLitePCL.raw
+
+Refer to the linked upstream projects for complete license texts and notices.

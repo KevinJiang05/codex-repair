@@ -1,0 +1,6 @@
+backups/
+dist/
+src/**/bin/
+src/**/obj/
+.portable-publish-*/
+tests/.portable-selftest-*/
