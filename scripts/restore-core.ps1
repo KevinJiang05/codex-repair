@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+﻿[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
     [Parameter(Mandatory = $true)]
     [string]$ManifestPath,
@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'session-io.ps1')
 
 function Get-NormalizedPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -133,7 +134,7 @@ function Get-RuntimeRecords {
             if (-not $line.Contains('thread_settings_applied')) {
                 continue
             }
-            $record = $line | ConvertFrom-Json -Depth 100
+            $record = $line | ConvertFrom-Json
             if ($record.payload.type -eq 'thread_settings_applied') {
                 $provider = [string]$record.payload.thread_settings.model_provider_id
                 if ($provider) {
@@ -166,7 +167,7 @@ if (-not (Test-Path -LiteralPath $normalizedManifest -PathType Leaf)) {
     throw "Backup manifest not found: $normalizedManifest"
 }
 
-$manifest = Get-Content -LiteralPath $normalizedManifest -Raw | ConvertFrom-Json -Depth 20
+$manifest = Get-Content -LiteralPath $normalizedManifest -Raw | ConvertFrom-Json
 $sessionId = [string]$manifest.session_id
 $targetProvider = [string]$manifest.target_provider
 $sessionProviderBefore = [string]$manifest.session_provider_before
@@ -198,6 +199,7 @@ if (-not $pythonCommand) {
 if (-not $pythonCommand) {
     throw 'Python 3 is required to restore the Codex state database.'
 }
+$pythonBootstrap = 'import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))'
 
 $sqliteHelper = @'
 import json
@@ -206,8 +208,13 @@ import sqlite3
 import sys
 
 mode, database, session_id = sys.argv[1:4]
-connection = sqlite3.connect(database, timeout=10)
+uri = "file:" + database.replace("\\", "/") + "?mode=" + ("ro" if mode == "inspect" else "rw")
+connection = sqlite3.connect(uri, uri=True, timeout=10)
 connection.execute("pragma busy_timeout=10000")
+columns = {row[1] for row in connection.execute("pragma table_info(threads)")}
+if not {"id", "rollout_path", "created_at", "model_provider", "title", "archived"} <= columns:
+    connection.close()
+    raise SystemExit("Unsupported Codex state database schema; no restore was made.")
 row = connection.execute(
     "select model_provider, rollout_path from threads where id = ?",
     (session_id,),
@@ -239,8 +246,8 @@ with sqlite3.connect(backup) as destination:
 try:
     connection.execute("begin immediate")
     cursor = connection.execute(
-        "update threads set model_provider = ? where id = ? and model_provider = ?",
-        (restore_provider, session_id, expected_current),
+        "update threads set model_provider = ? where id = ? and model_provider = ? and rollout_path = ?",
+        (restore_provider, session_id, expected_current, row[1]),
     )
     if cursor.rowcount != 1:
         raise RuntimeError("Expected exactly one restored database row.")
@@ -256,7 +263,8 @@ print(json.dumps({"backup": backup}))
 function Invoke-SqliteHelper {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
-    $output = & $pythonCommand.Source @pythonArguments -c $sqliteHelper @Arguments
+    $encodedCode = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sqliteHelper))
+    $output = & $pythonCommand.Source @pythonArguments -c $pythonBootstrap $encodedCode @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "SQLite restore helper failed with exit code $LASTEXITCODE."
     }
@@ -283,7 +291,7 @@ catch [IO.IOException] {
 }
 $newBytes = $bytes
 $firstLine = Get-JsonlLine -Bytes $newBytes -LineNumber 1
-$metadata = $firstLine | ConvertFrom-Json -Depth 100
+$metadata = $firstLine | ConvertFrom-Json
 if ($metadata.type -ne 'session_meta' -or $metadata.payload.id -ne $sessionId) {
     throw 'Current session metadata does not match the backup manifest.'
 }
@@ -336,7 +344,7 @@ if ($runtimeRewrites.Count -gt 0) {
             throw 'The runtime rewrite target does not match the manifest target provider.'
         }
         $line = Get-JsonlLine -Bytes $newBytes -LineNumber $lineNumber
-        $record = $line | ConvertFrom-Json -Depth 100
+        $record = $line | ConvertFrom-Json
         if ($record.payload.type -ne 'thread_settings_applied' -or
             [string]$record.payload.thread_settings.model_provider_id -ne $after) {
             throw "Runtime provider on line $lineNumber changed after the repair; restore refused."
@@ -391,20 +399,41 @@ if ($PSCmdlet.ShouldProcess(
 )) {
     $null = New-Item -ItemType Directory -Path $recoveryDirectory
     $sessionReplaced = $false
+    $sessionGuard = $null
+    $replacementGuard = $null
     try {
+        $sessionGuard = Open-SessionWriteGuard -Path $sessionFile -ExpectedBytes $bytes
+        if ($sessionNeedsRestore) {
+            Copy-Item -LiteralPath $sessionFile -Destination $sessionRecoveryPath
+        }
+        $restoreReport = [ordered]@{
+            version = 1
+            operation = 'pre_restore_backup'
+            created_at = (Get-Date).ToString('o')
+            source_manifest = $normalizedManifest
+            session_id = $sessionId
+            session_file = $sessionFile
+            session_backup = $sessionRecoveryPath
+            state_database = $stateDatabasePath
+            database_backup = $databaseRecoveryPath
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $recoveryDirectory 'restore-report.json'),
+            ($restoreReport | ConvertTo-Json -Depth 5),
+            [Text.UTF8Encoding]::new($false)
+        )
         if ($sessionNeedsRestore) {
             $originalLastWriteTimeUtc = (Get-Item -LiteralPath $sessionFile).LastWriteTimeUtc
-            Copy-Item -LiteralPath $sessionFile -Destination $sessionRecoveryPath
             $temporaryPath = "$sessionFile.codex-restore-$timestamp.tmp"
             [IO.File]::WriteAllBytes($temporaryPath, $newBytes)
             $verifyMetadata = (Get-JsonlLine -Bytes (Read-AllBytesShared $temporaryPath) -LineNumber 1) |
-                ConvertFrom-Json -Depth 100
+                ConvertFrom-Json
             if ($verifyMetadata.payload.id -ne $sessionId) {
                 throw 'Restored session verification failed.'
             }
-            [IO.File]::Move($temporaryPath, $sessionFile, $true)
+            Complete-SessionReplacement -Path $sessionFile -TemporaryPath $temporaryPath -LastWriteTimeUtc $originalLastWriteTimeUtc
             $sessionReplaced = $true
-            (Get-Item -LiteralPath $sessionFile).LastWriteTimeUtc = $originalLastWriteTimeUtc
+            $replacementGuard = Open-SessionWriteGuard -Path $sessionFile -ExpectedBytes $newBytes
         }
         if ($databaseNeedsRestore) {
             $null = Invoke-SqliteHelper -Arguments @(
@@ -418,33 +447,22 @@ if ($PSCmdlet.ShouldProcess(
             Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
         }
         if ($sessionReplaced -and (Test-Path -LiteralPath $sessionRecoveryPath)) {
-            Copy-Item -LiteralPath $sessionRecoveryPath -Destination $sessionFile -Force
-            (Get-Item -LiteralPath $sessionFile).LastWriteTimeUtc = $originalLastWriteTimeUtc
+            if (-not $replacementGuard) {
+                throw 'JSONL was replaced but another writer intervened. Content was retained; close the task and restore from the saved manifest.'
+            }
+            [IO.File]::WriteAllBytes($temporaryPath, $bytes)
+            Complete-SessionReplacement -Path $sessionFile -TemporaryPath $temporaryPath -LastWriteTimeUtc $originalLastWriteTimeUtc
         }
         throw
     }
+    finally {
+        if ($replacementGuard) { $replacementGuard.Dispose() }
+        if ($sessionGuard) { $sessionGuard.Dispose() }
+        if ($temporaryPath -and [IO.File]::Exists($temporaryPath)) {
+            [IO.File]::Delete($temporaryPath)
+        }
+    }
 
-    $restoreReport = [ordered]@{
-        version = 1
-        operation = 'pre_restore_backup'
-        created_at = (Get-Date).ToString('o')
-        source_manifest = $normalizedManifest
-        session_id = $sessionId
-        session_file = $sessionFile
-        session_backup = $sessionRecoveryPath
-        state_database = $stateDatabasePath
-        database_backup = $databaseRecoveryPath
-    }
-    try {
-        [IO.File]::WriteAllText(
-            (Join-Path $recoveryDirectory 'restore-report.json'),
-            ($restoreReport | ConvertTo-Json -Depth 5),
-            [Text.UTF8Encoding]::new($false)
-        )
-    }
-    catch {
-        Write-Warning "Restore succeeded, but the restore report could not be written: $($_.Exception.Message)"
-    }
     Write-Output "Restored session: $sessionId"
     Write-Output "Pre-restore backup: $recoveryDirectory"
     Write-Output 'Reopen the Codex task to reload it.'

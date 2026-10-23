@@ -1,0 +1,6 @@
+SQLite is in the public domain.
+
+Upstream statement: https://www.sqlite.org/copyright.html
+The SQLite source code and documentation are dedicated to the public domain.
+This notice records the provenance of the SQLite native library distributed
+through SQLitePCLRaw.lib.e_sqlite3; the wrapper license is supplied separately.

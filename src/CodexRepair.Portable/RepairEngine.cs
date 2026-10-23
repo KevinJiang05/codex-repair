@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Security.Cryptography;
 
 namespace CodexRepair;
 
@@ -24,7 +25,10 @@ internal sealed class RepairEngine
         var configPath = Path.Combine(CodexHome, "config.toml");
         if (!File.Exists(configPath)) throw new InvalidOperationException($"找不到 Codex 配置：{configPath}");
         var text = File.ReadAllText(configPath, Encoding.UTF8);
-        var match = Regex.Match(text, "(?m)^\\s*model_provider\\s*=\\s*\"([A-Za-z0-9_-]+)\"\\s*$");
+        var rootConfig = Regex.Split(text, "(?m)^\\s*\\[")[0];
+        var match = Regex.Match(rootConfig, "(?m)^\\s*model_provider\\s*=\\s*\"([A-Za-z0-9_-]+)\"\\s*(?:#.*)?$");
+        if (!match.Success && Regex.IsMatch(rootConfig, "(?m)^\\s*model_provider\\s*="))
+            throw new InvalidDataException("Unsupported top-level model_provider syntax; check the target configuration.");
         var provider = match.Success ? match.Groups[1].Value : "openai";
         ValidateProvider(provider);
         if (provider is not ("openai" or "ollama" or "lmstudio" or "amazon-bedrock"))
@@ -125,6 +129,7 @@ internal sealed class RepairEngine
                   ?? throw new InvalidOperationException("状态数据库中已经找不到该任务。");
         var sessionPath = Path.GetFullPath(row.RolloutPath);
         if (!File.Exists(sessionPath)) throw new FileNotFoundException("当前任务 JSONL 不存在。", sessionPath);
+        using var sessionGuard = OpenSessionGuard(sessionPath);
         var inspection = InspectSession(sessionPath, manifest.SessionId, includeLatestLine: true);
         if (inspection.FileState != "ok") throw new InvalidOperationException("当前任务 JSONL 无法安全恢复。");
 
@@ -178,33 +183,9 @@ internal sealed class RepairEngine
         var originalTime = File.GetLastWriteTimeUtc(sessionPath);
         var currentSessionBackup = sessionChanged ? Path.Combine(recoveryDirectory, Path.GetFileName(sessionPath) + ".bak") : null;
         var currentDatabaseBackup = databaseChanged ? Path.Combine(recoveryDirectory, Path.GetFileName(manifest.StateDatabase) + ".bak") : null;
-        var replaced = false;
-        try
-        {
-            if (sessionChanged)
-            {
-                File.Copy(sessionPath, currentSessionBackup!, overwrite: false);
-                AtomicWrite(sessionPath, newBytes);
-                File.SetLastWriteTimeUtc(sessionPath, originalTime);
-                replaced = true;
-            }
-            if (databaseChanged)
-            {
-                BackupDatabase(manifest.StateDatabase, currentDatabaseBackup!);
-                UpdateDatabaseProvider(manifest.StateDatabase, manifest.SessionId, manifest.TargetProvider,
-                    manifest.DatabaseProviderBefore, sessionPath);
-            }
-        }
-        catch
-        {
-            if (replaced && currentSessionBackup is not null)
-            {
-                File.Copy(currentSessionBackup, sessionPath, overwrite: true);
-                File.SetLastWriteTimeUtc(sessionPath, originalTime);
-            }
-            throw;
-        }
-
+        if (sessionChanged) File.Copy(sessionPath, currentSessionBackup!, overwrite: false);
+        if (databaseChanged) BackupDatabase(manifest.StateDatabase, currentDatabaseBackup!);
+        // Persist recovery information before either store is changed.
         File.WriteAllText(Path.Combine(recoveryDirectory, "restore-report.json"),
             JsonSerializer.Serialize(new
             {
@@ -218,6 +199,36 @@ internal sealed class RepairEngine
                 state_database = manifest.StateDatabase,
                 database_backup = currentDatabaseBackup
             }, JsonOptions), new UTF8Encoding(false));
+        var replaced = false;
+        FileStream? replacementGuard = null;
+        try
+        {
+            if (sessionChanged)
+            {
+                AtomicWrite(sessionPath, newBytes, originalTime);
+                replaced = true;
+                replacementGuard = OpenSessionGuard(sessionPath, newBytes);
+            }
+            if (databaseChanged)
+            {
+                UpdateDatabaseProvider(manifest.StateDatabase, manifest.SessionId, manifest.TargetProvider,
+                    manifest.DatabaseProviderBefore, sessionPath);
+            }
+        }
+        catch
+        {
+            if (replaced && currentSessionBackup is not null)
+            {
+                if (replacementGuard is null)
+                    throw new IOException("JSONL was replaced but another writer intervened. Content was retained; close the task and restore from the saved manifest.");
+                AtomicWrite(sessionPath, bytes, originalTime);
+            }
+            throw;
+        }
+        finally
+        {
+            replacementGuard?.Dispose();
+        }
         return recoveryDirectory;
     }
 
@@ -229,6 +240,7 @@ internal sealed class RepairEngine
                   ?? throw new InvalidOperationException("状态数据库中已找不到该任务。");
         if (!SamePath(row.RolloutPath, item.RolloutPath))
             throw new InvalidOperationException("任务 JSONL 路径在扫描后发生变化，请重新扫描。");
+        using var sessionGuard = OpenSessionGuard(item.RolloutPath);
         var inspection = InspectSession(item.RolloutPath, item.Id, includeLatestLine: true);
         if (inspection.FileState != "ok") throw new InvalidOperationException("任务 JSONL 无法安全读取。");
         var runtimeNeedsChange = inspection.RuntimeProvider is not null && inspection.RuntimeProvider != target;
@@ -274,32 +286,7 @@ internal sealed class RepairEngine
         }
 
         var originalTime = File.GetLastWriteTimeUtc(item.RolloutPath);
-        var replaced = false;
-        try
-        {
-            if (sessionBackup is not null)
-            {
-                File.Copy(item.RolloutPath, sessionBackup, overwrite: false);
-                AtomicWrite(item.RolloutPath, newBytes);
-                File.SetLastWriteTimeUtc(item.RolloutPath, originalTime);
-                replaced = true;
-                var verification = InspectSession(item.RolloutPath, item.Id, includeLatestLine: false);
-                if (verification.FileProvider != target || runtimeNeedsChange && verification.RuntimeProvider != target)
-                    throw new InvalidOperationException("JSONL 写入后验证失败。");
-            }
-            if (databaseNeedsChange)
-                UpdateDatabaseProvider(item.DatabasePath, item.Id, row.Provider, target, item.RolloutPath);
-        }
-        catch
-        {
-            if (replaced && sessionBackup is not null)
-            {
-                File.Copy(sessionBackup, item.RolloutPath, overwrite: true);
-                File.SetLastWriteTimeUtc(item.RolloutPath, originalTime);
-            }
-            throw;
-        }
-
+        if (sessionBackup is not null) File.Copy(item.RolloutPath, sessionBackup, overwrite: false);
         var manifest = new RepairManifest
         {
             SessionId = item.Id,
@@ -316,6 +303,34 @@ internal sealed class RepairEngine
         };
         File.WriteAllText(Path.Combine(sessionDirectory, "manifest.json"),
             JsonSerializer.Serialize(manifest, JsonOptions), new UTF8Encoding(false));
+        var replaced = false;
+        FileStream? replacementGuard = null;
+        try
+        {
+            if (sessionBackup is not null)
+            {
+                AtomicWrite(item.RolloutPath, newBytes, originalTime);
+                replaced = true;
+                replacementGuard = OpenSessionGuard(item.RolloutPath, newBytes);
+            }
+            if (databaseNeedsChange)
+                UpdateDatabaseProvider(item.DatabasePath, item.Id, row.Provider, target, item.RolloutPath);
+        }
+        catch
+        {
+            if (replaced && sessionBackup is not null)
+            {
+                if (replacementGuard is null)
+                    throw new IOException("JSONL was replaced but another writer intervened. Content was retained; close the task and restore from the saved manifest.");
+                AtomicWrite(item.RolloutPath, bytes, originalTime);
+            }
+            throw;
+        }
+
+        finally
+        {
+            replacementGuard?.Dispose();
+        }
     }
 
     private static void WriteBatchReport(string directory, string target, int selected, List<RepairOutcome> outcomes)
@@ -408,8 +423,23 @@ internal sealed class RepairEngine
             Pooling = false
         };
         var connection = new SqliteConnection(builder.ToString());
-        connection.Open();
-        return connection;
+        try
+        {
+            connection.Open();
+            using var schema = connection.CreateCommand();
+            schema.CommandText = "pragma table_info(threads)";
+            using var reader = schema.ExecuteReader();
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (reader.Read()) columns.Add(reader.GetString(1));
+            if (!new[] { "id", "rollout_path", "created_at", "model_provider", "title", "archived" }.All(columns.Contains))
+                throw new InvalidDataException("Unsupported Codex state database schema; no repair was made.");
+            return connection;
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
     }
 
     private static (string Provider, string RolloutPath)? GetDatabaseRow(string database, string id)
@@ -514,17 +544,37 @@ internal sealed class RepairEngine
         return regex.Replace(line, match => match.Groups[1].Value + "\"" + after + "\"", 1);
     }
 
-    private static void AtomicWrite(string destination, byte[] bytes)
+    private static FileStream OpenSessionGuard(string path, byte[]? expected = null)
+    {
+        var guard = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+        try
+        {
+            if (expected is not null && !SHA256.HashData(guard).AsSpan().SequenceEqual(SHA256.HashData(expected)))
+                throw new IOException("Session changed during replacement; concurrent content was retained.");
+            return guard;
+        }
+        catch
+        {
+            guard.Dispose();
+            throw;
+        }
+    }
+
+    private static void AtomicWrite(string destination, byte[] bytes, DateTime originalTime)
     {
         var temp = destination + ".codex-repair-" + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
             File.WriteAllBytes(temp, bytes);
-            using (var stream = new FileStream(temp, FileMode.Open, FileAccess.Read, FileShare.Read))
+            File.SetLastWriteTimeUtc(temp, originalTime);
+            using (var check = File.OpenRead(temp))
             {
-                if (stream.Length != bytes.LongLength) throw new IOException("临时文件长度验证失败。");
+                if (check.Length != bytes.LongLength ||
+                    !SHA256.HashData(check).AsSpan().SequenceEqual(SHA256.HashData(bytes)))
+                    throw new IOException("临时文件写入验证失败。");
             }
-            File.Move(temp, destination, overwrite: true);
+            // Windows requires the replacement source to be closed for ReplaceFile.
+            File.Replace(temp, destination, null);
         }
         finally
         {

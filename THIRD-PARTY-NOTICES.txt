@@ -1,12 +1,23 @@
-Codex Repair portable build includes components from:
+Codex Repair 0.6.2 - third-party components
 
-- .NET Runtime — MIT License
-  https://github.com/dotnet/runtime
-- Microsoft.Data.Sqlite — MIT License
-  https://learn.microsoft.com/dotnet/standard/data/sqlite/
-- SQLite — Public Domain
-  https://www.sqlite.org/copyright.html
-- SQLitePCLRaw — Apache License 2.0
-  https://github.com/ericsink/SQLitePCL.raw
+The project itself is licensed under MIT (see LICENSE).
+The Windows self-contained package includes:
 
-Refer to the linked upstream projects for complete license texts and notices.
+- .NET runtime and Windows Desktop runtime 8.0.32, Microsoft/.NET Foundation
+  MIT; upstream: https://github.com/dotnet/runtime/tree/v8.0.32
+  License: licenses/dotnet-LICENSE.txt and licenses/windowsdesktop-LICENSE.txt
+  Component notices: licenses/dotnet-THIRD-PARTY-NOTICES.txt
+- Microsoft.Data.Sqlite and Microsoft.Data.Sqlite.Core 8.0.8
+  MIT; upstream: https://github.com/dotnet/efcore/tree/v8.0.8
+  License: licenses/efcore-LICENSE.txt
+- SQLitePCLRaw bundle, core, provider, and native library packages 2.1.14
+  Apache-2.0 wrapper; upstream: https://github.com/ericsink/SQLitePCL.raw
+  License: licenses/SQLitePCLRaw-LICENSE.txt
+- SQLite native engine 3.54.0, distributed by SQLitePCLRaw.lib.e_sqlite3
+  Public domain: https://www.sqlite.org/copyright.html
+  Provenance: licenses/SQLite-PUBLIC-DOMAIN.txt
+- System.Memory (transitive package)
+  MIT; covered by the .NET license and component notices above.
+
+Python and PowerShell are not bundled with the script archive.
+The source archive does not include user configuration, session stores, or backups.

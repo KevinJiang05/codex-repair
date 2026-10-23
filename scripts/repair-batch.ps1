@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$PlanPath
@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repairScript = Join-Path $PSScriptRoot 'repair-core.ps1'
-$plan = Get-Content -LiteralPath $PlanPath -Raw | ConvertFrom-Json -Depth 20
+$plan = Get-Content -LiteralPath $PlanPath -Raw | ConvertFrom-Json
 $batchDirectory = [IO.Path]::GetFullPath([string]$plan.batch_directory)
 $backupRoot = [IO.Path]::GetFullPath([string]$plan.backup_root)
 $progressPath = Join-Path $batchDirectory 'progress.log'
@@ -63,7 +63,14 @@ function Write-BatchReport {
         ($report | ConvertTo-Json -Depth 8),
         $utf8
     )
-    [IO.File]::Move($temporaryReport, $reportPath, $true)
+    if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
+        $swapBackup = "$reportPath.swap"
+        [IO.File]::Replace($temporaryReport, $reportPath, $swapBackup)
+        Remove-Item -LiteralPath $swapBackup -Force -ErrorAction SilentlyContinue
+    }
+    else {
+        [IO.File]::Move($temporaryReport, $reportPath)
+    }
 }
 
 $items = @($plan.items)

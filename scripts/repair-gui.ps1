@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$ScanOnly,
     [switch]$SummaryOnly,
@@ -9,6 +9,31 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $ScanOnly -and $PSVersionTable.PSVersion.Major -eq 6) {
+    $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+        throw 'PowerShell 6 cannot host the WinForms window. Windows PowerShell 5.1 is required for the GUI.'
+    }
+    $launchArguments = @(
+        '-NoLogo', '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+        '-File', $PSCommandPath, '-CodexHome', $CodexHome
+    )
+    if ($PSBoundParameters.ContainsKey('FromDate')) {
+        $launchArguments += @('-FromDate', $FromDate.ToString('yyyy-MM-dd'))
+    }
+    if ($PSBoundParameters.ContainsKey('ToDate')) {
+        $launchArguments += @('-ToDate', $ToDate.ToString('yyyy-MM-dd'))
+    }
+    if ($AllDates) {
+        $launchArguments += '-AllDates'
+    }
+    & $windowsPowerShell @launchArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "PowerShell 5.1 GUI exited with code $LASTEXITCODE."
+    }
+    return
+}
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $configPath = Join-Path $CodexHome 'config.toml'
@@ -38,15 +63,20 @@ if (-not $pythonCommand) {
 if (-not $pythonCommand) {
     throw 'Python 3 is required to scan the Codex state database.'
 }
+$pythonBootstrap = 'import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))'
 
 function Get-CurrentProvider {
     $configText = [IO.File]::ReadAllText($configPath)
+    $rootConfig = ([regex]::Split($configText, '(?m)^\s*\['))[0]
     $match = [regex]::Match(
-        $configText,
-        '(?m)^\s*model_provider\s*=\s*"([A-Za-z0-9_-]+)"\s*$'
+        $rootConfig,
+        '(?m)^\s*model_provider\s*=\s*"([A-Za-z0-9_-]+)"\s*(?:#.*)?$'
     )
     if ($match.Success) {
         return $match.Groups[1].Value
+    }
+    if ([regex]::IsMatch($rootConfig, '(?m)^\s*model_provider\s*=')) {
+        throw 'Unsupported top-level model_provider syntax; scan refused.'
     }
     return 'openai'
 }
@@ -76,6 +106,9 @@ for database in database_paths:
     uri = "file:" + database.replace("\\", "/") + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True, timeout=10)
     try:
+        columns = {row[1] for row in connection.execute("pragma table_info(threads)")}
+        if not {"id", "rollout_path", "created_at", "model_provider", "title", "archived"} <= columns:
+            raise SystemExit("Unsupported Codex state database schema; scan refused.")
         rows = connection.execute(
             "select id, rollout_path, created_at, model_provider, title, archived "
             "from threads where created_at >= ? and created_at < ? "
@@ -176,7 +209,8 @@ function Get-ScanResults {
         $endEpoch = ([DateTimeOffset]$End.Date.AddDays(1)).ToUnixTimeSeconds()
     }
 
-    $output = & $pythonCommand.Source @pythonArguments -c $scannerCode `
+    $encodedCode = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scannerCode))
+    $output = & $pythonCommand.Source @pythonArguments -c $pythonBootstrap $encodedCode `
         $CodexHome $TargetProvider $startEpoch $endEpoch
     if ($LASTEXITCODE -ne 0) {
         throw "Scanner failed with exit code $LASTEXITCODE."
@@ -373,7 +407,7 @@ $repairTimer.Add_Tick({
     if (Test-Path -LiteralPath $liveReportPath -PathType Leaf) {
         try {
             $liveReport = Get-Content -LiteralPath $liveReportPath -Raw |
-                ConvertFrom-Json -Depth 20
+                ConvertFrom-Json
             $statusLabel.Text = "后台修复中：$($liveReport.completed_count) / $($liveReport.selected_count)；失败 $($liveReport.failed_count)"
         }
         catch {
@@ -397,7 +431,7 @@ $repairTimer.Add_Tick({
     $reportPath = Join-Path $script:repairBatchDirectory 'batch-report.json'
     if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
         try {
-            $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -Depth 20
+            $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
             $statusLabel.Text = "后台处理完成：成功 $($report.success_count)，失败 $($report.failed_count)；请重新扫描"
             [Windows.Forms.MessageBox]::Show(
                 "后台批量处理完成：成功 $($report.success_count)，失败 $($report.failed_count)。`r`n" +
@@ -551,6 +585,7 @@ $repairButton.Add_Click({
         "将把 $($selected.Count) 个任务同步到 provider '$currentProvider'，其中高级修复 $($advancedSelected.Count) 个。`r`n" +
         "每个 JSONL 修改前都会备份；每个状态数据库本批只备份一次。`r`n" +
         "备份统一位于 $backupRoot。`r`n" +
+        "请先关闭对应 Codex 任务，并在处理期间保持关闭。`r`n" +
         "是否继续？",
         '确认批量修复', 'YesNo', 'Warning'
     )
@@ -595,16 +630,18 @@ $repairButton.Add_Click({
         )
 
         $processInfo = [Diagnostics.ProcessStartInfo]::new()
-        $processInfo.FileName = Join-Path $PSHOME 'pwsh.exe'
+        $hostExecutable = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            'powershell.exe'
+        }
+        else {
+            'pwsh.exe'
+        }
+        $processInfo.FileName = Join-Path $PSHOME $hostExecutable
         $processInfo.UseShellExecute = $false
         $processInfo.CreateNoWindow = $true
         $processInfo.WorkingDirectory = $projectRoot
-        $processInfo.ArgumentList.Add('-NoLogo')
-        $processInfo.ArgumentList.Add('-NoProfile')
-        $processInfo.ArgumentList.Add('-File')
-        $processInfo.ArgumentList.Add($batchRepairScript)
-        $processInfo.ArgumentList.Add('-PlanPath')
-        $processInfo.ArgumentList.Add($planPath)
+        $processInfo.Arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -PlanPath "{1}"' -f `
+            $batchRepairScript, $planPath
 
         $script:repairProcess = [Diagnostics.Process]::Start($processInfo)
         $script:repairBatchDirectory = $batchDirectory
@@ -642,7 +679,7 @@ $restoreButton.Add_Click({
 
     try {
         $restoreManifest = Get-Content -LiteralPath $dialog.FileName -Raw |
-            ConvertFrom-Json -Depth 20
+            ConvertFrom-Json
         $restoreSessionId = [string]$restoreManifest.session_id
         $restoreTarget = [string]$restoreManifest.target_provider
         $answer = [Windows.Forms.MessageBox]::Show(

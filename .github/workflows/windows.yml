@@ -1,0 +1,47 @@
+name: Windows checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-dotnet@v6.0.0
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Windows PowerShell 5.1 regressions
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\smoke.ps1
+      - name: PowerShell 7 regressions
+        run: pwsh -NoProfile -File .\tests\smoke.ps1
+      - name: Build portable engine
+        run: dotnet build .\src\CodexRepair.Portable\CodexRepair.Portable.csproj -c Release
+      - name: Portable engine regressions
+        run: dotnet .\src\CodexRepair.Portable\bin\Release\net8.0-windows\CodexRepair.dll --self-test
+      - name: Build both release packages
+        run: |
+          .\scripts\build-script-package.ps1
+          .\scripts\build-portable.ps1
+      - name: Validate release archives
+        run: .\tests\release.ps1
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: windows-release-candidate
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error

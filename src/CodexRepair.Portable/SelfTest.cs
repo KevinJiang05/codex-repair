@@ -51,13 +51,50 @@ internal static class SelfTest
                 command.Parameters.AddWithValue("$path", rollout);
                 command.Parameters.AddWithValue("$created", DateTimeOffset.Now.ToUnixTimeSeconds());
                 command.ExecuteNonQuery();
+                command.CommandText = "select sqlite_version()";
+                var sqliteVersion = Version.Parse((string)command.ExecuteScalar()!);
+                Assert(sqliteVersion >= new Version(3, 50, 2), "Bundled SQLite predates the CVE-2025-6965 fix.");
+                Console.WriteLine("SQLite: " + sqliteVersion);
             }
 
             var engine = new RepairEngine(codexHome, backups);
+            File.WriteAllText(Path.Combine(codexHome, "config.toml"), "[profiles.demo]\nmodel_provider = \"nested-only\"\n");
+            Assert(engine.GetCurrentProvider() == "openai", "Nested profile provider was treated as a root setting.");
+            File.WriteAllText(Path.Combine(codexHome, "config.toml"), "model_provider = \"openai\" # fixture comment\n");
             var scan = engine.Scan(DateTime.Today.AddDays(-1), DateTime.Today.AddDays(1), false);
             Assert(scan.Count == 1 && scan[0].AdvancedRepairable("openai"), "Fixture was not classified as advanced.");
+            var originalBytes = File.ReadAllBytes(rollout);
+            var originalTime = File.GetLastWriteTimeUtc(rollout);
+            using (var writer = new FileStream(rollout, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+            {
+                var busy = engine.RepairBatch([new RepairSelection(scan[0], true)], "openai");
+                Assert(!busy.Outcomes[0].Success, "Repair accepted an open writer.");
+                Assert(ReadDatabaseProvider(database, id) == "custom", "Busy-file refusal changed SQLite.");
+            }
+            Assert(File.ReadAllBytes(rollout).SequenceEqual(originalBytes), "Busy-file refusal changed JSONL.");
+
+            // Make manifest.json unwritable using a directory, through the real batch progress callback.
+            var manifestFailure = engine.RepairBatch([new RepairSelection(scan[0], true)], "openai",
+                new CallbackProgress(progress =>
+                {
+                    if (progress.Completed != 0) return;
+                    var batch = Directory.GetDirectories(backups).OrderBy(path => path, StringComparer.Ordinal).Last();
+                    Directory.CreateDirectory(Path.Combine(batch, "sessions", id, "manifest.json"));
+                }));
+            Assert(!manifestFailure.Outcomes[0].Success, "Unwritable manifest was ignored.");
+            Assert(File.ReadAllBytes(rollout).SequenceEqual(originalBytes), "Manifest failure changed JSONL.");
+            Assert(ReadDatabaseProvider(database, id) == "custom", "Manifest failure changed SQLite.");
+
+            Execute(database, "create trigger refuse_update before update on threads begin select raise(abort, 'fixture database failure'); end");
+            var databaseFailure = engine.RepairBatch([new RepairSelection(scan[0], true)], "openai");
+            Assert(!databaseFailure.Outcomes[0].Success, "Database failure was ignored.");
+            Assert(File.ReadAllBytes(rollout).SequenceEqual(originalBytes), "Database failure did not roll back JSONL.");
+            Assert(File.GetLastWriteTimeUtc(rollout) == originalTime, "Rollback changed JSONL mtime.");
+            Assert(ReadDatabaseProvider(database, id) == "custom", "Failed transaction changed SQLite.");
+            Execute(database, "drop trigger refuse_update");
+
             var repaired = engine.RepairBatch([new RepairSelection(scan[0], true)], "openai");
-            Assert(repaired.Outcomes.Count == 1 && repaired.Outcomes[0].Success, "Advanced repair failed.");
+            Assert(repaired.Outcomes.Count == 1 && repaired.Outcomes[0].Success, "Advanced repair failed: " + repaired.Outcomes.FirstOrDefault()?.Error);
             Assert(ReadHeaderProvider(rollout) == "openai", "Header provider was not repaired.");
             Assert(ReadRuntimeProvider(rollout) == "openai", "Runtime provider was not repaired.");
             Assert(ReadDatabaseProvider(database, id) == "openai", "Database provider was not repaired.");
@@ -65,11 +102,26 @@ internal static class SelfTest
             var manifest = Directory.EnumerateFiles(repaired.BatchDirectory, "manifest.json", SearchOption.AllDirectories).Single();
             File.AppendAllText(rollout, JsonSerializer.Serialize(new { type = "event_msg", payload = new { type = "after_repair" } }) + "\n",
                 new UTF8Encoding(false));
+            var appendedBytes = File.ReadAllBytes(rollout);
+            using (var writer = new FileStream(rollout, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+            {
+                AssertThrows<IOException>(() => engine.Restore(manifest), "Restore accepted an open writer.");
+            }
+            Assert(File.ReadAllBytes(rollout).SequenceEqual(appendedBytes), "Busy restore lost appended content.");
             engine.Restore(manifest);
             Assert(ReadHeaderProvider(rollout) == "custom", "Header provider was not restored.");
             Assert(ReadRuntimeProvider(rollout) == "custom", "Runtime provider was not restored.");
             Assert(ReadDatabaseProvider(database, id) == "custom", "Database provider was not restored.");
             Assert(File.ReadAllText(rollout).Contains("after_repair", StringComparison.Ordinal), "Restore discarded appended content.");
+
+            Execute(database, "alter table threads rename column model_provider to unsupported_provider");
+            var unknownBytes = File.ReadAllBytes(rollout);
+            AssertThrows<InvalidDataException>(() => engine.Scan(DateTime.Today, DateTime.Today, true),
+                "Unknown database schema was accepted.");
+            var unknownRepair = engine.RepairBatch([new RepairSelection(scan[0], true)], "openai");
+            Assert(!unknownRepair.Outcomes[0].Success, "Repair accepted an unknown schema.");
+            Assert(File.ReadAllBytes(rollout).SequenceEqual(unknownBytes), "Unknown schema changed JSONL.");
+            Console.WriteLine("PASS: writer refusal, manifest failure, DB rollback, mtime, appended content, unknown schema.");
         }
         finally
         {
@@ -111,5 +163,26 @@ internal static class SelfTest
     private static void Assert(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
+    }
+
+    private static void Execute(string database, string sql)
+    {
+        using var connection = new SqliteConnection($"Data Source={database};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    private static void AssertThrows<T>(Action action, string message) where T : Exception
+    {
+        try { action(); }
+        catch (T) { return; }
+        throw new InvalidOperationException(message);
+    }
+
+    private sealed class CallbackProgress(Action<RepairProgress> callback) : IProgress<RepairProgress>
+    {
+        public void Report(RepairProgress value) => callback(value);
     }
 }

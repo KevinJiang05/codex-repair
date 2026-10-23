@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+﻿[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
 param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
@@ -17,6 +17,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'session-io.ps1')
 
 $configPath = Join-Path $CodexHome 'config.toml'
 $sessionsPath = Join-Path $CodexHome 'sessions'
@@ -38,6 +39,7 @@ if (-not $pythonCommand) {
 if (-not $pythonCommand) {
     throw 'Python 3 is required to inspect and update the Codex state database.'
 }
+$pythonBootstrap = 'import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))'
 
 $sqliteHelper = @'
 import json
@@ -61,6 +63,9 @@ if mode == "inspect":
     uri = "file:" + database.replace("\\", "/") + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True, timeout=10)
     try:
+        columns = {row[1] for row in connection.execute("pragma table_info(threads)")}
+        if not {"id", "rollout_path", "created_at", "model_provider", "title", "archived"} <= columns:
+            raise SystemExit("Unsupported Codex state database schema; no repair was made.")
         row = connection.execute(
             "select model_provider, rollout_path from threads where id = ?",
             (session_id,),
@@ -120,8 +125,8 @@ try:
     connection.execute("begin immediate")
     cursor = connection.execute(
         "update threads set model_provider = ? "
-        "where id = ? and model_provider = ?",
-        (target, session_id, old_provider),
+        "where id = ? and model_provider = ? and rollout_path = ?",
+        (target, session_id, old_provider, rollout_path),
     )
     if cursor.rowcount != 1:
         raise RuntimeError("Expected exactly one updated database row.")
@@ -144,7 +149,8 @@ print(json.dumps({"backup": backup}))
 function Invoke-SqliteHelper {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
-    $output = & $pythonCommand.Source @pythonArguments -c $sqliteHelper @Arguments
+    $encodedCode = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sqliteHelper))
+    $output = & $pythonCommand.Source @pythonArguments -c $pythonBootstrap $encodedCode @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "SQLite helper failed with exit code $LASTEXITCODE."
     }
@@ -236,7 +242,7 @@ function Get-RuntimeProviderRecordsShared {
                     continue
                 }
                 try {
-                    $record = $line | ConvertFrom-Json -Depth 100
+                    $record = $line | ConvertFrom-Json
                 }
                 catch {
                     throw "Invalid JSON on session line $lineNumber; automatic repair refused."
@@ -325,12 +331,16 @@ function Set-JsonlLineBytes {
 }
 
 $configText = Read-AllTextShared -Path $configPath
+$rootConfig = ([regex]::Split($configText, '(?m)^\s*\['))[0]
 $configuredProviderMatch = [regex]::Match(
-    $configText,
-    '(?m)^\s*model_provider\s*=\s*"([A-Za-z0-9_-]+)"\s*$'
+    $rootConfig,
+    '(?m)^\s*model_provider\s*=\s*"([A-Za-z0-9_-]+)"\s*(?:#.*)?$'
 )
 
 if (-not $TargetProvider) {
+    if (-not $configuredProviderMatch.Success -and [regex]::IsMatch($rootConfig, '(?m)^\s*model_provider\s*=')) {
+        throw 'Unsupported top-level model_provider syntax; repair refused.'
+    }
     $TargetProvider = if ($configuredProviderMatch.Success) {
         $configuredProviderMatch.Groups[1].Value
     }
@@ -379,7 +389,7 @@ else {
     $lineFeedIndex
 }
 $firstLine = [Text.Encoding]::UTF8.GetString($bytes, 0, $firstLineLength)
-$metadata = $firstLine | ConvertFrom-Json -Depth 100
+$metadata = $firstLine | ConvertFrom-Json
 
 if ($metadata.type -ne 'session_meta') {
     throw "First record is '$($metadata.type)', not session_meta."
@@ -531,15 +541,41 @@ if ($PSCmdlet.ShouldProcess(
     "synchronize model_provider to '$TargetProvider'"
 )) {
     $sessionFileReplaced = $false
+    $sessionGuard = $null
+    $replacementGuard = $null
     try {
+        $sessionGuard = Open-SessionWriteGuard -Path $sessionFile -ExpectedBytes $bytes
         $null = New-Item -ItemType Directory -Path $backupDirectory -Force
+        if ($sessionContentNeedsChange) {
+            Copy-Item -LiteralPath $sessionFile -Destination $sessionBackupPath
+        }
+        $manifest = [ordered]@{
+            version = 2
+            created_at = (Get-Date).ToString('o')
+            session_id = $SessionId
+            target_provider = $TargetProvider
+            session_file = $sessionFile
+            session_provider_before = $oldProvider
+            session_backup = $sessionBackupPath
+            state_database = $stateDatabasePath
+            database_provider_before = $databaseProvider
+            database_backup = $databaseBackupPath
+            runtime_providers = $runtimeProviderSet
+            runtime_latest_provider = $runtimeLatestProvider
+            runtime_rewrites = $runtimeRewrites
+            batch_backup_directory = $normalizedBatchDirectory
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $backupDirectory 'manifest.json'),
+            ($manifest | ConvertTo-Json -Depth 5),
+            [Text.UTF8Encoding]::new($false)
+        )
         if ($sessionContentNeedsChange) {
             $originalLastWriteTimeUtc = (Get-Item -LiteralPath $sessionFile).LastWriteTimeUtc
             $temporarySessionPath = "$sessionFile.codex-repair-$timestamp.tmp"
-            Copy-Item -LiteralPath $sessionFile -Destination $sessionBackupPath
             [IO.File]::WriteAllBytes($temporarySessionPath, $newBytes)
             $verifyLine = Read-FirstLineShared -Path $temporarySessionPath
-            $verifyMetadata = $verifyLine | ConvertFrom-Json -Depth 100
+            $verifyMetadata = $verifyLine | ConvertFrom-Json
             if ($verifyMetadata.payload.id -ne $SessionId -or
                 $verifyMetadata.payload.model_provider -ne $TargetProvider) {
                 throw 'Session file post-write verification failed.'
@@ -554,9 +590,9 @@ if ($PSCmdlet.ShouldProcess(
                     throw 'Runtime provider post-write verification failed.'
                 }
             }
-            [IO.File]::Move($temporarySessionPath, $sessionFile, $true)
+            Complete-SessionReplacement -Path $sessionFile -TemporaryPath $temporarySessionPath -LastWriteTimeUtc $originalLastWriteTimeUtc
             $sessionFileReplaced = $true
-            (Get-Item -LiteralPath $sessionFile).LastWriteTimeUtc = $originalLastWriteTimeUtc
+            $replacementGuard = Open-SessionWriteGuard -Path $sessionFile -ExpectedBytes $newBytes
         }
 
         $databaseUpdate = $null
@@ -578,40 +614,20 @@ if ($PSCmdlet.ShouldProcess(
             Remove-Item -LiteralPath $temporarySessionPath -Force -ErrorAction SilentlyContinue
         }
         if ($sessionFileReplaced -and $sessionBackupPath -and (Test-Path -LiteralPath $sessionBackupPath)) {
-            Copy-Item -LiteralPath $sessionBackupPath -Destination $sessionFile -Force
-            if ($originalLastWriteTimeUtc) {
-                (Get-Item -LiteralPath $sessionFile).LastWriteTimeUtc = $originalLastWriteTimeUtc
+            if (-not $replacementGuard) {
+                throw 'JSONL was replaced but another writer intervened. Content was retained; close the task and restore from the saved manifest.'
             }
+            [IO.File]::WriteAllBytes($temporarySessionPath, $bytes)
+            Complete-SessionReplacement -Path $sessionFile -TemporaryPath $temporarySessionPath -LastWriteTimeUtc $originalLastWriteTimeUtc
         }
         throw
     }
-
-    $manifest = [ordered]@{
-        version = 2
-        created_at = (Get-Date).ToString('o')
-        session_id = $SessionId
-        target_provider = $TargetProvider
-        session_file = $sessionFile
-        session_provider_before = $oldProvider
-        session_backup = $sessionBackupPath
-        state_database = $stateDatabasePath
-        database_provider_before = $databaseProvider
-        database_backup = $databaseBackupPath
-        runtime_providers = $runtimeProviderSet
-        runtime_latest_provider = $runtimeLatestProvider
-        runtime_rewrites = $runtimeRewrites
-        batch_backup_directory = $normalizedBatchDirectory
-    }
-    try {
-        $manifestJson = $manifest | ConvertTo-Json -Depth 5
-        [IO.File]::WriteAllText(
-            (Join-Path $backupDirectory 'manifest.json'),
-            $manifestJson,
-            [Text.UTF8Encoding]::new($false)
-        )
-    }
-    catch {
-        Write-Warning "Repair succeeded, but the backup manifest could not be written: $($_.Exception.Message)"
+    finally {
+        if ($replacementGuard) { $replacementGuard.Dispose() }
+        if ($sessionGuard) { $sessionGuard.Dispose() }
+        if ($temporarySessionPath -and [IO.File]::Exists($temporarySessionPath)) {
+            [IO.File]::Delete($temporarySessionPath)
+        }
     }
 
     Write-Output "Updated session: $SessionId"

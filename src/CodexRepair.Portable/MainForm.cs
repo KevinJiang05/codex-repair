@@ -23,7 +23,7 @@ internal sealed class MainForm : Form
     private string _scannedProvider = "";
     private bool _busy;
 
-    public MainForm()
+    public MainForm(bool demo = false)
     {
         Text = "Codex Repair 便携版";
         StartPosition = FormStartPosition.CenterScreen;
@@ -44,11 +44,44 @@ internal sealed class MainForm : Form
 
         BuildLayout();
         ConfigureGrid();
-        WireEvents();
+        if (!demo) WireEvents();
+    }
+
+    internal static void SaveDemoScreenshot(string path)
+    {
+        using var form = new MainForm(demo: true);
+        form.Text = "Codex Repair · Demo / 合成数据";
+        form._scannedProvider = "openai";
+        form._providerLabel.Text = "目标 provider：openai";
+        form._from.Value = new DateTime(2026, 10, 17);
+        form._to.Value = new DateTime(2026, 10, 23);
+        form._onlyProblems.Checked = false;
+        var created = new DateTimeOffset(2026, 10, 23, 10, 30, 0, TimeSpan.FromHours(8));
+        form._items =
+        [
+            new("11111111-1111-4111-8111-111111111111", created, "custom", "custom", "openai", "ok", false, "Demo: ordinary provider mismatch", "", ""),
+            new("22222222-2222-4222-8222-222222222222", created.AddMinutes(-10), "custom", "custom", "custom", "ok", false, "Demo: latest runtime setting conflict", "", ""),
+            new("33333333-3333-4333-8333-333333333333", created.AddMinutes(-20), "openai", "openai", "openai", "ok", true, "Demo: consistent archived thread", "", ""),
+            new("44444444-4444-4444-8444-444444444444", created.AddMinutes(-30), "custom", "<missing>", "<none>", "file missing", false, "Demo: missing rollout, repair blocked", "", "")
+        ];
+        form.ShowItems();
+        form._log.Text = "DEMO / 合成数据\r\nRed: standard repair · Yellow: runtime conflict or blocked · White: consistent\r\nThis screenshot does not read or modify a real Codex profile.";
+        form.ShowInTaskbar = false;
+        form.StartPosition = FormStartPosition.Manual;
+        form.Location = new Point(-32000, -32000);
+        form.Show();
+        form.PerformLayout();
+        Application.DoEvents();
+        form._grid.ClearSelection();
+        using var bitmap = new Bitmap(form.Width, form.Height);
+        form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size));
+        bitmap.Save(Path.GetFullPath(path), System.Drawing.Imaging.ImageFormat.Png);
+        form.Hide();
     }
 
     private void BuildLayout()
     {
+        _log.Dock = DockStyle.Fill;
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -229,7 +262,7 @@ internal sealed class MainForm : Form
         }
         var advancedCount = selected.Count(value => value.Advanced);
         if (MessageBox.Show(this,
-                $"将把 {selected.Count} 个任务同步到 '{current}'，其中高级修复 {advancedCount} 个。\r\n写入前会创建备份。是否继续？",
+                $"将把 {selected.Count} 个任务同步到 '{current}'，其中高级修复 {advancedCount} 个。\r\n请先关闭对应 Codex 任务，并在处理期间保持关闭。\r\n写入前会创建备份。是否继续？",
                 "确认修复", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
         if (advancedCount > 0 && MessageBox.Show(this,
                 $"高级修复会改写 {advancedCount} 个任务最后一条生效的运行时 provider。\r\n更早历史记录保持不变。确定继续？",
