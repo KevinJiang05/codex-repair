@@ -1,20 +1,24 @@
 # Codex Repair
 
-**从一次真实的开发工具故障出发，做一个可复用的 Windows 会话诊断与修复工具。**
+**Windows 下的 Codex 会话 provider 诊断与修复工具，支持修复前备份和定点恢复。**
 
-[English](README.en.md) · [下载 v0.6.2](https://github.com/KevinJiang05/codex-repair/releases/tag/v0.6.2) · [使用指南](docs/usage.md) · [验证记录](docs/publish-preview.md)
+切换模型提供方后，部分旧会话可能仍记录旧 provider。Codex Repair 对照会话文件、SQLite 索引和最后一次运行时设置，显示不一致项，并对选中的会话执行修复。
+
+[English](README.en.md) · [下载 v0.6.2 预发布版](https://github.com/KevinJiang05/codex-repair/releases/tag/v0.6.2) · [使用指南](docs/usage.md) · [验证记录](docs/publish-preview.md)
 
 [![Windows checks](https://github.com/KevinJiang05/codex-repair/actions/workflows/windows.yml/badge.svg)](https://github.com/KevinJiang05/codex-repair/actions/workflows/windows.yml)
 
 Windows x64 · C# / WinForms · PowerShell · SQLite · MIT
 
-我在切换 Codex 的模型提供方（provider）时，遇到了新会话正常、部分旧会话仍使用旧 provider 的问题。这个个人项目把排查过程整理成了图形化工具：检查三处持久化记录，区分普通不一致与运行时冲突，再对选中的任务执行备份、修复和定点恢复。
+**使用前：**先核对目标 provider，关闭目标任务并在修复、恢复期间保持关闭。工具会在写入前保存备份，请保持备份私有。这是非官方预发布工具；provider 字段一致不保证会话能够跨提供方恢复。
 
 ![实际 WinForms 界面：普通冲突、运行时冲突、一致任务与缺失文件](docs/images/overview.png)
 
 *实际界面使用合成数据生成；任务 ID、标题和路径均为演示内容。GUI 目前为中文。*
 
 ## 项目解决的问题
+
+我在切换 Codex 的模型提供方（provider）时，遇到了新会话正常、部分旧会话仍使用旧 provider 的问题。这个个人项目把排查过程整理成了图形化工具：检查三处持久化记录，区分普通不一致与运行时冲突，再对选中的任务执行备份、修复和定点恢复。
 
 会话列表里的 provider、JSONL 头部的 provider，以及恢复会话时使用的运行时设置，可能并不一致。仅修改索引或 JSONL 头部，可能遗漏真正影响恢复行为的最后一条设置。相关场景也有 [CC Switch 的公开问题记录](https://github.com/farion1231/cc-switch/issues/5922)。
 
@@ -23,6 +27,17 @@ Codex Repair 同时检查这些状态，把“发现不一致”和“允许写�
 - **扫描与分类**：按日期查看普通任务、归档任务、运行时冲突和文件异常。
 - **选择性修复**：普通模式保留运行时冲突；高级模式需显式启用并二次确认。
 - **可核对的恢复**：修复前保存备份和清单，恢复时只撤销相关 provider 字段，保留后来追加的普通对话。
+
+## 运行与下载
+
+一般使用推荐 **Windows x64 便携包**，无需另装运行依赖；需要查看或使用 PowerShell 脚本时选择纯脚本包。从 [v0.6.2 预发布](https://github.com/KevinJiang05/codex-repair/releases/tag/v0.6.2) 下载完整 ZIP，解压到可写目录，双击 **Codex Repair.cmd**。
+
+| 版本 | 适用方式 |
+| --- | --- |
+| [Windows x64 便携包（推荐）](https://github.com/KevinJiang05/codex-repair/releases/download/v0.6.2/CodexRepair-v0.6.2-win-x64.zip) | 内置 .NET 运行时，无需另装 PowerShell、Python 或 .NET |
+| [纯脚本包](https://github.com/KevinJiang05/codex-repair/releases/download/v0.6.2/CodexRepair-v0.6.2-script.zip) | Windows PowerShell 5.1 或 PowerShell 6/7，以及 Python 3 |
+
+先核对目标 provider，只选择一个已关闭的任务验证，再逐批处理。操作步骤、颜色含义和恢复方法见 [使用指南](docs/usage.md)。
 
 ## 实现思路与工程取舍
 
@@ -45,17 +60,6 @@ flowchart LR
 | 兼顾可审查与易分发 | 保留 PowerShell 实现，同时提供不要求用户安装运行依赖的 C# 自包含便携包 |
 
 两种实现各有合成数据回归用例。项目保持本地文件工具的结构，不需要服务端或额外数据库服务。
-
-## 运行与下载
-
-从 [v0.6.2 预发布](https://github.com/KevinJiang05/codex-repair/releases/tag/v0.6.2) 下载完整 ZIP，解压到可写目录，双击 **Codex Repair.cmd**。
-
-| 版本 | 适用方式 |
-| --- | --- |
-| [Windows x64 便携包](https://github.com/KevinJiang05/codex-repair/releases/download/v0.6.2/CodexRepair-v0.6.2-win-x64.zip) | 内置 .NET 运行时，无需另装 PowerShell、Python 或 .NET |
-| [纯脚本包](https://github.com/KevinJiang05/codex-repair/releases/download/v0.6.2/CodexRepair-v0.6.2-script.zip) | Windows PowerShell 5.1 或 PowerShell 6/7，以及 Python 3 |
-
-先核对目标 provider，只选择一个已关闭的任务验证，再逐批处理。操作步骤、颜色含义和恢复方法见 [使用指南](docs/usage.md)。
 
 ## 开发与验证
 

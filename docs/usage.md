@@ -54,7 +54,7 @@
 | 目标平台 | Windows 10/11 x64；本地验证环境与结果见 [验证记录](publish-preview.md) |
 | 自动化数据 | 合成 state_5.sqlite，包含 id、rollout_path、created_at、model_provider、title、archived |
 | JSONL 格式 | session_meta 与上述 thread_settings_applied 事件形状 |
-| 存储目录 | 默认读取用户目录下 .codex；PowerShell 脚本可显式传入 -CodexHome |
+| 存储目录 | 默认读取用户目录下 .codex；PowerShell 脚本可显式传入 -CodexHome；C# GUI 尚不自动识别自定义 CODEX_HOME |
 | 未认证范围 | 尚未对某个完整 Codex 客户端版本进行端到端兼容认证；多版本、远程/云会话及不同事件格式需单独验证 |
 
 数据库编号本身不代表兼容；缺少所需字段时会明确拒绝处理。PowerShell 6 的 GUI 会转交系统 Windows PowerShell 5.1；本轮自动化覆盖 5.1 和 7，6 的兼容入口保留但未重新实测。

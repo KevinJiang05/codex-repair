@@ -41,6 +41,8 @@ The JSONL file and SQLite database are separate stores, with no single transacti
 
 Use the restore button to select a thread's manifest.json inside this copy's backups directory. Restore reverts the provider fields changed by this tool, preserves ordinary appended conversation records, and refuses newer runtime settings. It never replaces the live database with an old whole-database snapshot.
 
+Backups default to the backups directory under the tool's root; the PowerShell repair script accepts -BackupRoot. Close the target threads before restoring as well.
+
 Backups can contain complete conversations, titles, absolute paths, and database snapshots. Keep them private. Issues should contain redacted errors and synthetic reproductions, without original JSONL, SQLite, backups, or configuration files.
 
 The application reads configuration and conversation files locally. It does not extract, display, or upload credentials, and does not change config.toml. Building downloads dependencies from NuGet.

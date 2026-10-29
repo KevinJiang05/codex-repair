@@ -1,20 +1,24 @@
 # Codex Repair
 
-**A Windows conversation-history utility, built from a real debugging problem in my development workflow.**
+**A Windows tool for diagnosing and repairing provider inconsistencies in Codex conversation history, with backups and targeted restore.**
 
-[简体中文](README.md) · [Download v0.6.2](https://github.com/KevinJiang05/codex-repair/releases/tag/v0.6.2) · [Usage guide](docs/usage.en.md) · [Validation record](docs/publish-preview.md)
+After a provider switch, some existing threads may still reference the previous provider. Codex Repair compares the session file, SQLite index, and latest runtime setting, shows mismatches, and repairs selected threads.
+
+[简体中文](README.md) · [Download v0.6.2 prerelease](https://github.com/KevinJiang05/codex-repair/releases/tag/v0.6.2) · [Usage guide](docs/usage.en.md) · [Validation record](docs/publish-preview.md)
 
 [![Windows checks](https://github.com/KevinJiang05/codex-repair/actions/workflows/windows.yml/badge.svg)](https://github.com/KevinJiang05/codex-repair/actions/workflows/windows.yml)
 
 Windows x64 · C# / WinForms · PowerShell · SQLite · MIT
 
-After switching Codex model providers, I found that new threads could work while some resumed threads still used the previous provider. This personal project turns that investigation into a desktop utility: inspect three persisted records, distinguish ordinary mismatches from runtime conflicts, and back up, repair, or restore selected threads.
+**Before use:** Check the target provider and keep target threads closed throughout repair and restore. The tool saves backups before writing; keep them private. This unofficial prerelease cannot guarantee that matching provider fields will make a thread resume across providers.
 
 ![Real WinForms UI with synthetic ordinary, runtime-conflict, consistent, and missing-file records](docs/images/overview.png)
 
 *The actual UI is rendered with synthetic IDs, titles, and paths. The GUI is currently in Chinese.*
 
 ## The problem
+
+After switching Codex model providers, I found that new threads could work while some resumed threads still used the previous provider. This personal project turns that investigation into a desktop utility: inspect three persisted records, distinguish ordinary mismatches from runtime conflicts, and back up, repair, or restore selected threads.
 
 The provider recorded in a thread index, its JSONL header, and the latest persisted runtime setting can disagree. Updating the index or header alone can miss the setting that affects resume behavior. [CC Switch issue #5922](https://github.com/farion1231/cc-switch/issues/5922) documents a related report.
 
@@ -23,6 +27,17 @@ The tool separates diagnosis from permission to write:
 - **Inspect and classify** ordinary and archived threads, runtime conflicts, and invalid files within a date range.
 - **Repair selected threads**, leaving runtime conflicts untouched unless advanced mode is enabled and confirmed twice.
 - **Restore specific changes**, reverting provider fields while retaining ordinary conversation records appended after repair.
+
+## Download and run
+
+For general use, choose the **Windows x64 portable package**, which needs no separately installed runtime. Choose the script package to inspect or use the PowerShell scripts. Download the full ZIP from the [v0.6.2 prerelease](https://github.com/KevinJiang05/codex-repair/releases/tag/v0.6.2), extract it into a writable directory, and launch **Codex Repair.cmd**.
+
+| Package | Requirements |
+| --- | --- |
+| [Windows x64 portable (recommended)](https://github.com/KevinJiang05/codex-repair/releases/download/v0.6.2/CodexRepair-v0.6.2-win-x64.zip) | Bundled .NET; no separate PowerShell, Python, or .NET installation |
+| [Script package](https://github.com/KevinJiang05/codex-repair/releases/download/v0.6.2/CodexRepair-v0.6.2-script.zip) | Windows PowerShell 5.1 or PowerShell 6/7, and Python 3 |
+
+Inspect the target provider and verify one closed thread before proceeding in batches. See the [usage guide](docs/usage.en.md) for controls, classifications, and restore instructions.
 
 ## Design decisions
 
@@ -45,17 +60,6 @@ flowchart LR
 | Support review and distribution | Retain the PowerShell implementation alongside a self-contained C# package with no separately installed runtime requirements |
 
 Both implementations have synthetic-data regressions. The application remains a local file utility without a backend or separate database service.
-
-## Download and run
-
-Download the full ZIP from the [v0.6.2 prerelease](https://github.com/KevinJiang05/codex-repair/releases/tag/v0.6.2), extract it into a writable directory, and launch **Codex Repair.cmd**.
-
-| Package | Requirements |
-| --- | --- |
-| [Windows x64 portable](https://github.com/KevinJiang05/codex-repair/releases/download/v0.6.2/CodexRepair-v0.6.2-win-x64.zip) | Bundled .NET; no separate PowerShell, Python, or .NET installation |
-| [Script package](https://github.com/KevinJiang05/codex-repair/releases/download/v0.6.2/CodexRepair-v0.6.2-script.zip) | Windows PowerShell 5.1 or PowerShell 6/7, and Python 3 |
-
-Inspect the target provider and verify one closed thread before proceeding in batches. See the [usage guide](docs/usage.en.md) for controls, classifications, and restore instructions.
 
 ## Development and verification
 
